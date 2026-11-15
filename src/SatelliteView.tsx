@@ -1,10 +1,13 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api, hasBackend, type LandCoverResponse, paced, type SatelliteImage } from './api'
 import { ExplainPanel } from './Explain'
-import { fmtNum, formatForecastText, LANDCOVER_LABEL, translateWarning, type Lang } from './i18n'
+import { useNearestCity } from './cities'
+import { CITY, fmtNum, formatForecastText, LANDCOVER_LABEL, translateWarning, type Lang } from './i18n'
 import { SeriesChart } from './SeriesChart'
 import { Card, Loader } from './ui'
+
+const CityGrowth3D = lazy(() => import('./CityGrowth3D').then((m) => ({ default: m.CityGrowth3D })))
 
 const CLASS_COLORS: Record<string, string> = {
   'Zona construida': '#f59e42',
@@ -22,13 +25,21 @@ export function SatelliteView({
   lon,
   label,
   lang,
+  scrollToGrowth = false,
+  onGrowthScrolled,
 }: {
   lat: number
   lon: number
   label: string
   lang: Lang
+  /** Si es true, al abrir la vista se desplaza (suave) hasta la sección de crecimiento urbano. */
+  scrollToGrowth?: boolean
+  onGrowthScrolled?: () => void
 }) {
   const [toYear, setToYear] = useState(2035)
+  // Crecimiento urbano proyectado: solo si hay una ciudad precalculada a menos de 30 km del lugar.
+  const nearCity = useNearestCity(lat, lon)
+  const growthRef = useRef<HTMLElement>(null)
   const spot = `${lat},${lon}`
   const coverKey = `${spot},${toYear}`
   const [timeline, setTimeline] = useState<{ spot: string; images: SatelliteImage[] } | null>(null)
@@ -101,6 +112,16 @@ export function SatelliteView({
         builtUnit: '% built-up',
         builtLabel: 'Built-up area',
       }
+
+  useEffect(() => {
+    if (!scrollToGrowth || !nearCity) return
+    const id = window.setTimeout(() => {
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      growthRef.current?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' })
+      onGrowthScrolled?.()
+    }, 700)
+    return () => window.clearTimeout(id)
+  }, [scrollToGrowth, nearCity, onGrowthScrolled])
 
   return (
     <div className="studio-block">
@@ -244,6 +265,17 @@ export function SatelliteView({
             </>
           )}
         </>
+      )}
+
+      {nearCity && (
+        <section ref={growthRef} id="crecimiento-urbano" className="city-growth-section" aria-label={CITY[lang].sectionTitle}>
+          <h3 className="city-growth-title">{CITY[lang].sectionTitle}</h3>
+          <Suspense fallback={<Loader label={CITY[lang].loading} />}>
+            <Card as="div" className="city3d-card">
+              <CityGrowth3D entry={nearCity} lang={lang} />
+            </Card>
+          </Suspense>
+        </section>
       )}
     </div>
   )
