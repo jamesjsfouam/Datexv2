@@ -29,6 +29,7 @@ const STYLE: StyleSpecification = {
 const BASE_COLOR = '#14206b' // azul marino con algo de luz para que se lea el relieve
 const PROJ_NEAR = '#56e1e8'
 const PROJ_FAR = '#a6f1f5'
+const VERT_COLOR = '#ffffff'
 const NEVER = 9999 // año "infinito": la celda no se añade en ese escenario
 
 type Scenario = 'integrated' | 'population_only'
@@ -40,25 +41,17 @@ function decode(b64: string): Uint8Array {
   return out
 }
 
-/** Variación determinista por celda (0–1) para que las alturas no se vean planas. */
-function jitter(r: number, c: number): number {
-  const x = Math.sin(r * 127.1 + c * 311.7) * 43758.5453
-  return x - Math.floor(x)
-}
-
-function heightOf(density: number, r: number, c: number): number {
-  return 6 + 54 * Math.pow(density / 100, 1.3) + jitter(r, c) * 6
-}
-
 type CellFeature = {
   type: 'Feature'
-  properties: { k: number; y: number; yb: number; h: number }
+  properties: { k: number; y: number; yb: number; h0: number; core: number }
   geometry: { type: 'Polygon'; coordinates: number[][][] }
 }
 type CellCollection = { type: 'FeatureCollection'; features: CellFeature[] }
 
 /** Una celda = un polígono. k=0: construido en el año base; k=1: añadido por algún escenario.
- *  y = año en que la añade el escenario integrado; yb = año en que la añade el de solo población. */
+ *  y = año en que la añade el escenario integrado; yb = año en que la añade el de solo población.
+ *  h0 = altura real de partida (m) si k=0, o altura de una celda nueva (m) si k=1.
+ *  core = peso de centralidad (0–1): el crecimiento vertical se concentra en el núcleo denso. */
 function buildFeatures(city: CityPayload): CellCollection {
   const { cols, rows, west, south, east, north } = city.grid
   const dlon = (east - west) / cols
@@ -67,6 +60,9 @@ function buildFeatures(city: CityPayload): CellCollection {
   const addedI = decode(city.added)
   const addedP = city.added_base ? decode(city.added_base) : addedI
   const water = decode(city.water)
+  const hBase = city.height ? decode(city.height) : null
+  const hNew = city.height_new ? decode(city.height_new) : null
+  const coreG = city.core ? decode(city.core) : null
   const inset = 0.05
   const feats: CellFeature[] = []
   for (let r = 0; r < rows; r++) {
@@ -82,13 +78,17 @@ function buildFeatures(city: CityPayload): CellCollection {
       const n = north - (r + inset) * dlat
       const s = north - (r + 1 - inset) * dlat
       const projected = d === 0
+      const h0 = projected
+        ? Math.max(3, hNew ? hNew[i] : 5)
+        : Math.max(3, hBase ? hBase[i] : 3 + (d / 100) * 12)
       feats.push({
         type: 'Feature',
         properties: {
           k: projected ? 1 : 0,
           y: projected ? (a > 0 ? city.years[a] : NEVER) : city.base_year,
           yb: projected ? (ab > 0 ? city.years[ab] : NEVER) : city.base_year,
-          h: projected ? heightOf(city.new_cell_density * 100, r, c) : heightOf(d, r, c),
+          h0,
+          core: coreG ? coreG[i] / 100 : 0,
         },
         geometry: { type: 'Polygon', coordinates: [[[w, n], [e, n], [e, s], [w, s], [w, n]]] },
       })
@@ -106,6 +106,11 @@ function colorExpr(city: CityPayload, s: Scenario) {
   ]
 }
 
+/** Altura de una celda en el año t: h0 · (1 + (m − 1) · core). m = multiplicador de altura del año (1 sin crecimiento vertical). */
+const grownHeight = (m: number, exag: number) =>
+  ['*', ['get', 'h0'], ['+', 1, ['*', m - 1, ['get', 'core']]], exag] as never
+const baseHeight = (exag: number) => ['*', ['get', 'h0'], exag] as never
+
 function sensValue(map: Record<string, number>, key: string): number | undefined {
   return map[key]
 }
@@ -118,10 +123,12 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
   const [onlyProjected, setOnlyProjected] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [scenario, setScenario] = useState<Scenario>('integrated')
+  const [exag, setExag] = useState(6)
+  const [rotating, setRotating] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const readyRef = useRef(false)
-  const live = useRef({ yearIdx: 0, onlyProjected: false, scenario: 'integrated' as Scenario })
+  const live = useRef({ yearIdx: 0, onlyProjected: false, scenario: 'integrated' as Scenario, exag: 6 })
 
   useEffect(() => {
     let alive = true
@@ -146,16 +153,31 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
   const year = years[yearIdx] ?? 0
   const hasBase = !!city?.added_base
 
+  function multiplierFor(sc: Scenario, y: number): number {
+    if (sc !== 'integrated' || !city?.vertical) return 1
+    return city.vertical.multiplier[String(y)] ?? 1
+  }
+
   function applyState(map: maplibregl.Map) {
     if (!city) return
-    const { yearIdx: yi, onlyProjected: op, scenario: sc } = live.current
+    const { yearIdx: yi, onlyProjected: op, scenario: sc, exag: ex } = live.current
     const y = city.years[yi]
+    const m = multiplierFor(sc, y)
     if (map.getLayer('city-proj')) {
       map.setFilter('city-proj', ['all', ['==', ['get', 'k'], 1], ['<=', ['get', prop(sc)], y]] as FilterSpecification)
       map.setPaintProperty('city-proj', 'fill-extrusion-color', colorExpr(city, sc) as never)
+      map.setPaintProperty('city-proj', 'fill-extrusion-height', grownHeight(m, ex))
     }
     if (map.getLayer('city-base')) {
       map.setPaintProperty('city-base', 'fill-extrusion-opacity', op ? 0.1 : 0.92)
+      map.setPaintProperty('city-base', 'fill-extrusion-height', baseHeight(ex))
+    }
+    if (map.getLayer('city-vert')) {
+      // capa blanca: los pisos que se suman encima de lo existente (solo en el escenario integrado y después del año base)
+      map.setLayoutProperty('city-vert', 'visibility', m > 1 ? 'visible' : 'none')
+      map.setPaintProperty('city-vert', 'fill-extrusion-base', baseHeight(ex))
+      map.setPaintProperty('city-vert', 'fill-extrusion-height', grownHeight(m, ex))
+      map.setPaintProperty('city-vert', 'fill-extrusion-opacity', op ? 0.1 : 0.96)
     }
   }
 
@@ -189,9 +211,20 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
         filter: ['==', ['get', 'k'], 0],
         paint: {
           'fill-extrusion-color': BASE_COLOR,
-          'fill-extrusion-height': ['get', 'h'],
+          'fill-extrusion-height': baseHeight(live.current.exag),
           'fill-extrusion-base': 0,
           'fill-extrusion-opacity': 0.92,
+        },
+      })
+      map.addLayer({
+        id: 'city-vert', type: 'fill-extrusion', source: 'city',
+        filter: ['==', ['get', 'k'], 0],
+        layout: { visibility: 'none' },
+        paint: {
+          'fill-extrusion-color': VERT_COLOR,
+          'fill-extrusion-height': baseHeight(live.current.exag),
+          'fill-extrusion-base': baseHeight(live.current.exag),
+          'fill-extrusion-opacity': 0.96,
         },
       })
       map.addLayer({
@@ -199,9 +232,9 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
         filter: ['all', ['==', ['get', 'k'], 1], ['<=', ['get', 'y'], city.base_year]] as FilterSpecification,
         paint: {
           'fill-extrusion-color': colorExpr(city, live.current.scenario) as never,
-          'fill-extrusion-height': ['get', 'h'],
+          'fill-extrusion-height': grownHeight(1, live.current.exag),
           'fill-extrusion-base': 0,
-          'fill-extrusion-opacity': 0.85,
+          'fill-extrusion-opacity': 0.88,
         },
       })
       readyRef.current = true
@@ -230,11 +263,21 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
   }, [features, city, scenario, yearIdx, onlyProjected])
 
   useEffect(() => {
-    live.current = { yearIdx, onlyProjected, scenario }
+    live.current = { yearIdx, onlyProjected, scenario, exag }
     const map = mapRef.current
     if (map && readyRef.current) applyState(map)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [yearIdx, onlyProjected, scenario, city, features])
+  }, [yearIdx, onlyProjected, scenario, exag, city, features])
+
+  // Giro automático opcional (se detiene al desmontar o al desactivarlo).
+  useEffect(() => {
+    if (!rotating) return
+    const id = window.setInterval(() => {
+      const map = mapRef.current
+      if (map && readyRef.current) map.setBearing(map.getBearing() + 0.6)
+    }, 40)
+    return () => window.clearInterval(id)
+  }, [rotating])
 
   useEffect(() => {
     if (!playing || !city) return
@@ -267,6 +310,18 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
   const times = v.baseline_random ? v.figure_of_merit / v.baseline_random : 0
   const vsNear = v.baseline_proximity ? v.figure_of_merit / v.baseline_proximity : 0
   const cityShort = city.name.split(',')[0]
+
+  // Crecimiento vertical: lo existente gana altura (solo en el escenario integrado); 'Solo población' crece en horizontal.
+  const vert = city.vertical
+  const integrated = scenario === 'integrated'
+  const baseKey = String(city.base_year)
+  const hExist = vert ? (integrated ? vert.mean_height_existing_m[key] : vert.mean_height_existing_m[baseKey]) : undefined
+  const hExist0 = vert?.mean_height_existing_m[baseKey]
+  const hMax = vert ? (integrated ? vert.max_height_m[key] : vert.max_height_m[baseKey]) : undefined
+  const volume = vert ? (integrated ? vert.volume_million_m3[key] : vert.volume_million_m3_population_only[key]) : undefined
+  const volVert = vert && integrated ? vert.volume_from_vertical_million_m3[key] ?? 0 : 0
+  const dH = hExist !== undefined && hExist0 ? hExist - hExist0 : 0
+  const dHtext = `${dH >= 0 ? '+' : '−'}${fmtNum(Math.abs(dH), lang, 3)} m`
 
   const drivers = city.drivers
   const rows = drivers ? Object.keys(drivers.table).sort() : []
@@ -310,6 +365,36 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
     { id: 'v', header: `km² ${years[years.length - 1]}`, align: 'right', cell: (r) => (r.val === undefined ? '—' : `${fmtNum(r.val, lang, 4)} km²`) },
   ]
 
+  // Efecto vertical por año: m(t) = (PIB(t)/PIB(base))^θ, altura media de lo existente y volumen.
+  type VRow = { year: string; gdp: number | undefined; m: number | undefined; h: number | undefined; vol: number | undefined; volv: number | undefined }
+  const vertRows: VRow[] = vert
+    ? years.map((y) => {
+        const k = String(y)
+        return {
+          year: k, gdp: drivers?.table[k]?.gdp_per_capita_usd, m: vert.multiplier[k],
+          h: vert.mean_height_existing_m[k], vol: vert.volume_million_m3[k], volv: vert.volume_from_vertical_million_m3[k],
+        }
+      })
+    : []
+  const vertCols: Column<VRow>[] = [
+    { id: 'y', header: T.colYear, cell: (r) => r.year, csv: (r) => r.year },
+    { id: 'g', header: T.colGdp, align: 'right', cell: (r) => (r.gdp === undefined ? '—' : f1(r.gdp, 4)), csv: (r) => r.gdp ?? '' },
+    { id: 'm', header: T.colMult, align: 'right', cell: (r) => (r.m === undefined ? '—' : f1(r.m, 3)), csv: (r) => r.m ?? '' },
+    { id: 'h', header: T.colHeightExisting, align: 'right', cell: (r) => (r.h === undefined ? '—' : f1(r.h, 3)), csv: (r) => r.h ?? '' },
+    { id: 'v', header: T.colVolume, align: 'right', cell: (r) => (r.vol === undefined ? '—' : f1(r.vol, 4)), csv: (r) => r.vol ?? '' },
+    { id: 'vv', header: T.colVolumeVertical, align: 'right', cell: (r) => (r.volv === undefined ? '—' : f1(r.volv, 3)), csv: (r) => r.volv ?? '' },
+  ]
+  // Sensibilidad vertical: volumen en el último año según la elasticidad θ.
+  type TRow = { th: string; val: number | undefined; used: boolean }
+  const thetaUsed = vert?.theta ?? 0.5
+  const thetaRows: TRow[] = ['0.0', '0.5', '1.0'].map((t) => ({
+    th: t, val: vert?.sensitivity_volume_2050_million_m3?.[`theta=${t}`], used: Math.abs(Number(t) - thetaUsed) < 1e-9,
+  }))
+  const thetaCols: Column<TRow>[] = [
+    { id: 't', header: T.sensTheta, cell: (r) => fmtNum(Number(r.th), lang, 2) + (r.used ? ` · ${T.sensCurrent}` : '') },
+    { id: 'v', header: `${T.kpiVolume} ${years[years.length - 1]} (${T.kpiVolumeUnit})`, align: 'right', cell: (r) => (r.val === undefined ? '—' : fmtNum(r.val, lang, 4)) },
+  ]
+
   return (
     <section className="city3d" aria-label={T.title}>
       <div className="city3d-head">
@@ -342,8 +427,21 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
         <div ref={wrapRef} className="city3d-map" role="img" aria-label={T.mapLabel} />
         <div className="city3d-legend" aria-hidden="true">
           <span><i className="sw sw-base" />{T.legendBase} {city.base_year}</span>
-          <span><i className="sw sw-proj" />{T.legendProjected}</span>
+          <span><i className="sw sw-proj" />{T.legendHorizontal}</span>
+          {vert && integrated && <span><i className="sw sw-vert" />{T.legendVertical}</span>}
         </div>
+      </div>
+
+      <div className="city3d-view">
+        <label className="city3d-exag">
+          <span>{T.exagLabel}: <b className="num">{exag}×</b></span>
+          <input type="range" min={1} max={12} step={1} value={exag} aria-label={T.exagLabel}
+            aria-valuetext={`${exag}×`} onChange={(e) => setExag(Number(e.target.value))} />
+        </label>
+        <Button variant="secondary" aria-pressed={rotating} onClick={() => setRotating((r) => !r)}>
+          {rotating ? T.rotateStop : T.rotate}
+        </Button>
+        <p className="muted small city3d-exag-note">{T.exagNote}</p>
       </div>
 
       <div className="city3d-controls">
@@ -383,12 +481,28 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
             <em className="muted small">{T.year} {year}</em>
           </Kpi>
         )}
+        {vert && hExist !== undefined && (
+          <Kpi label={T.kpiHeight} value={`${fmtNum(hExist, lang, 3)} m`} num>
+            <em className="muted small">{year === city.base_year || !integrated ? T.kpiHeightBase(city.base_year) : `${dHtext} ${T.change} ${city.base_year}`}</em>
+          </Kpi>
+        )}
+        {vert && hMax !== undefined && (
+          <Kpi label={T.kpiMax} value={`${fmtNum(hMax, lang, 3)} m`} num>
+            <em className="muted small">{T.kpiMaxNote}</em>
+          </Kpi>
+        )}
+        {vert && volume !== undefined && (
+          <Kpi label={T.kpiVolume} value={`${fmtNum(volume, lang, 4)} ${T.kpiVolumeUnit}`} num>
+            <em className="muted small">{integrated ? T.kpiVolumeVertical(fmtNum(volVert, lang, 3)) : T.kpiVolumeHorizontal}</em>
+          </Kpi>
+        )}
         <Kpi label={T.year} value={year} num>
           <em className="muted small">
             {visible !== null ? `${visible.toLocaleString(lang === 'es' ? 'es' : 'en-US')} ${lang === 'es' ? 'celdas visibles' : 'visible cells'}` : ''}
           </em>
         </Kpi>
       </div>
+      {vert && <p className="muted small city3d-heights-note">{T.heightsNote}</p>}
       <p className="sr-only" aria-live="polite">{km2 !== undefined ? T.summary(year, fmtNum(km2, lang, 4), pctText, city.base_year) : ''}</p>
 
       {drivers && (
@@ -398,6 +512,16 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
             columns={cols} rows={tableRows} rowKey={(r) => r.year} ariaLabel={T.driversTable}
             csvName={`ciudad-${city.id}-variables`} csvLabel={lang === 'es' ? 'Descargar CSV' : 'Download CSV'}
           />
+          {vert && (
+            <>
+              <h4 className="stat-sub-title">{T.verticalTitle}</h4>
+              <p className="small muted">{T.verticalNote(fmtNum(vert.theta, lang, 2))}</p>
+              <DataTable
+                columns={vertCols} rows={vertRows} rowKey={(r) => r.year} ariaLabel={T.verticalTitle}
+                csvName={`ciudad-${city.id}-vertical`} csvLabel={lang === 'es' ? 'Descargar CSV' : 'Download CSV'}
+              />
+            </>
+          )}
           <h4 className="stat-sub-title">{T.climateTitle}</h4>
           <ul className="small city3d-climate">
             {Object.entries(drivers.climate).map(([k, c]) => (
@@ -420,12 +544,14 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
           <p className="small muted">{T.sensNote}</p>
           <DataTable columns={sensCols} rows={sensRows} rowKey={(r) => r.s} ariaLabel={`${T.sensTitle}: ${T.sensStress}`} />
           <DataTable columns={gammaCols} rows={gammaRows} rowKey={(r) => r.g} ariaLabel={`${T.sensTitle}: ${T.sensIncome}`} />
+          {vert && <DataTable columns={thetaCols} rows={thetaRows} rowKey={(r) => r.th} ariaLabel={`${T.sensTitle}: ${T.sensTheta}`} />}
         </Disclosure>
       )}
 
       <Disclosure title={T.how} className="city3d-how">
         <h4 className="stat-sub-title">{T.methodTitle}</h4>
         <p className="small">{T.method}</p>
+        {vert && <p className="small">{T.methodVertical(vert.height_year)}</p>}
         <h4 className="stat-sub-title">{T.reliabilityTitle}</h4>
         <p className="small">
           {T.reliability(v.fit, v.test, fmtNum(v.auc, lang, 3), fmtNum(times, lang, 2), fmtNum(vsNear, lang, 2))}
