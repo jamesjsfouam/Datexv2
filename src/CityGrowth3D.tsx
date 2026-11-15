@@ -7,28 +7,29 @@ import { CITY, fmtNum, verdictLabel, type Lang } from './i18n'
 import { Button, Disclosure, Kpi, Switch } from './ui'
 
 const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services'
+const TERRAIN = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'
 const STYLE: StyleSpecification = {
   version: 8,
   sources: {
     base: {
       type: 'raster', tileSize: 256, maxzoom: 16,
-      tiles: [`${ESRI}/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}`],
-      attribution: 'Esri, HERE, Garmin, © OpenStreetMap contributors · Impact Observatory/Esri LULC · Copernicus DEM',
-    },
-    labels: {
-      type: 'raster', tileSize: 256, maxzoom: 16,
-      tiles: [`${ESRI}/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}`],
+      tiles: [`${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`],
+      attribution: 'Esri, Maxar, Earthstar Geographics, © OpenStreetMap contributors · Impact Observatory/Esri LULC · Copernicus DEM · GHSL (JRC) · Mapzen/AWS Terrain Tiles',
     },
   },
   layers: [
-    { id: 'base', type: 'raster', source: 'base' },
-    { id: 'labels', type: 'raster', source: 'labels', paint: { 'raster-opacity': 0.85 } },
+    { id: 'bg', type: 'background', paint: { 'background-color': '#050a3a' } },
+    // imagen satelital muy atenuada y desaturada: da contexto sin competir con los volúmenes
+    { id: 'base', type: 'raster', source: 'base', paint: { 'raster-opacity': 0.5, 'raster-saturation': -0.75, 'raster-brightness-max': 0.55, 'raster-contrast': 0.15 } },
   ],
 }
 
-const BASE_COLOR = '#14206b' // azul marino con algo de luz para que se lea el relieve
+// Rampa de altura (m) de lo existente: azul profundo (bajo) → cian claro (alto)
+const HEIGHT_STOPS: [number, string][] = [
+  [3, '#2a3cc4'], [6, '#3c63ea'], [10, '#4f93f5'], [16, '#6fc3f7'], [24, '#a8ecff'],
+]
 const PROJ_NEAR = '#56e1e8'
-const PROJ_FAR = '#a6f1f5'
+const PROJ_PULSE = '#f4ffff'
 const VERT_COLOR = '#ffffff'
 const NEVER = 9999 // año "infinito": la celda no se añade en ese escenario
 
@@ -63,7 +64,7 @@ function buildFeatures(city: CityPayload): CellCollection {
   const hBase = city.height ? decode(city.height) : null
   const hNew = city.height_new ? decode(city.height_new) : null
   const coreG = city.core ? decode(city.core) : null
-  const inset = 0.05
+  const inset = 0.12 // manzanas separadas por 'calles'
   const feats: CellFeature[] = []
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
@@ -99,17 +100,19 @@ function buildFeatures(city: CityPayload): CellCollection {
 
 const prop = (s: Scenario) => (s === 'integrated' ? 'y' : 'yb')
 
-function colorExpr(city: CityPayload, s: Scenario) {
-  return [
-    'interpolate', ['linear'], ['get', prop(s)],
-    city.years[1] ?? 2030, PROJ_NEAR, city.years[city.years.length - 1] ?? 2050, PROJ_FAR,
-  ]
+/** Color de lo proyectado: cian; las celdas añadidas EN el paso del año seleccionado resaltan (cian casi blanco). */
+function colorExpr(s: Scenario, year: number) {
+  return ['case', ['==', ['get', prop(s)], year], PROJ_PULSE, PROJ_NEAR]
 }
+const baseColorExpr = () => ['interpolate', ['linear'], ['get', 'h0'], ...HEIGHT_STOPS.flat()] as never
 
 /** Altura de una celda en el año t: h0 · (1 + (m − 1) · core). m = multiplicador de altura del año (1 sin crecimiento vertical). */
-const grownHeight = (m: number, exag: number) =>
-  ['*', ['get', 'h0'], ['+', 1, ['*', m - 1, ['get', 'core']]], exag] as never
-const baseHeight = (exag: number) => ['*', ['get', 'h0'], exag] as never
+const grownHeight = (m: number, exag: number, p = 1) =>
+  ['*', ['get', 'h0'], ['+', 1, ['*', m - 1, ['get', 'core']]], exag * p] as never
+const baseHeight = (exag: number, p = 1) => ['*', ['get', 'h0'], exag * p] as never
+const easeOut = (t: number) => 1 - Math.pow(1 - t, 3)
+const reducedMotion = () =>
+  typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
 function sensValue(map: Record<string, number>, key: string): number | undefined {
   return map[key]
@@ -129,6 +132,10 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
   const mapRef = useRef<maplibregl.Map | null>(null)
   const readyRef = useRef(false)
   const live = useRef({ yearIdx: 0, onlyProjected: false, scenario: 'integrated' as Scenario, exag: 6 })
+  const progRef = useRef(1) // 0 → las alturas están en el suelo; 1 → alturas completas
+  const rafRef = useRef(0)
+  const risenRef = useRef(false)
+  const ioRef = useRef<IntersectionObserver | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -163,22 +170,55 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
     const { yearIdx: yi, onlyProjected: op, scenario: sc, exag: ex } = live.current
     const y = city.years[yi]
     const m = multiplierFor(sc, y)
+    const p = progRef.current
     if (map.getLayer('city-proj')) {
       map.setFilter('city-proj', ['all', ['==', ['get', 'k'], 1], ['<=', ['get', prop(sc)], y]] as FilterSpecification)
-      map.setPaintProperty('city-proj', 'fill-extrusion-color', colorExpr(city, sc) as never)
-      map.setPaintProperty('city-proj', 'fill-extrusion-height', grownHeight(m, ex))
+      map.setPaintProperty('city-proj', 'fill-extrusion-color', colorExpr(sc, y) as never)
+      map.setPaintProperty('city-proj', 'fill-extrusion-height', grownHeight(m, ex, p))
+      map.setPaintProperty('city-proj', 'fill-extrusion-opacity', op ? 0.95 : 0.92)
+    }
+    if (map.getLayer('city-glow')) {
+      // halo luminoso en el suelo alrededor de lo nuevo
+      map.setFilter('city-glow', ['all', ['==', ['get', 'k'], 1], ['<=', ['get', prop(sc)], y]] as FilterSpecification)
+      map.setPaintProperty('city-glow', 'line-opacity', p < 1 ? 0.15 * p : 0.5)
     }
     if (map.getLayer('city-base')) {
-      map.setPaintProperty('city-base', 'fill-extrusion-opacity', op ? 0.1 : 0.92)
-      map.setPaintProperty('city-base', 'fill-extrusion-height', baseHeight(ex))
+      map.setPaintProperty('city-base', 'fill-extrusion-opacity', op ? 0.12 : 0.95)
+      map.setPaintProperty('city-base', 'fill-extrusion-height', baseHeight(ex, p))
     }
     if (map.getLayer('city-vert')) {
-      // capa blanca: los pisos que se suman encima de lo existente (solo en el escenario integrado y después del año base)
+      // corona translúcida: los pisos que se suman encima de lo existente (solo en el escenario integrado y después del año base)
       map.setLayoutProperty('city-vert', 'visibility', m > 1 ? 'visible' : 'none')
-      map.setPaintProperty('city-vert', 'fill-extrusion-base', baseHeight(ex))
-      map.setPaintProperty('city-vert', 'fill-extrusion-height', grownHeight(m, ex))
-      map.setPaintProperty('city-vert', 'fill-extrusion-opacity', op ? 0.1 : 0.96)
+      map.setPaintProperty('city-vert', 'fill-extrusion-base', baseHeight(ex, p))
+      map.setPaintProperty('city-vert', 'fill-extrusion-height', grownHeight(m, ex, p))
+      map.setPaintProperty('city-vert', 'fill-extrusion-opacity', op ? 0.12 : 0.6)
     }
+  }
+
+  /** Animación "crece desde el suelo": sube el factor de progreso con easing (sin animar si el usuario prefiere menos movimiento). */
+  function rise(from = 0, ms = 1200) {
+    const map = mapRef.current
+    if (!map || !readyRef.current) return
+    cancelAnimationFrame(rafRef.current)
+    if (reducedMotion()) {
+      progRef.current = 1
+      applyState(map)
+      return
+    }
+    const t0 = performance.now()
+    let last = 0
+    const tick = (now: number) => {
+      const t = Math.min(1, Math.max(0, (now - t0) / ms))
+      progRef.current = from + (1 - from) * easeOut(t)
+      if (now - last > 55 || t >= 1) {
+        last = now
+        applyState(map)
+      }
+      if (t < 1) rafRef.current = requestAnimationFrame(tick)
+    }
+    progRef.current = from
+    applyState(map)
+    rafRef.current = requestAnimationFrame(tick)
   }
 
   // El mapa se crea una vez por ciudad; el GeoJSON se construye una vez y año y escenario solo cambian el filtro.
@@ -204,16 +244,34 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
     const ro = new ResizeObserver(() => map.resize())
     ro.observe(box)
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true, showZoom: true }), 'top-right')
+    risenRef.current = false
     map.on('load', () => {
+      try {
+        map.setLight({ anchor: 'viewport', color: '#ffffff', intensity: 0.45, position: [1.6, 215, 42] })
+      } catch { /* sin luz personalizada: se ve igual, solo menos sombreado */ }
+      try {
+        // relieve real: la ciudad se asienta sobre el terreno; si no hay red o falla, se ve sobre el plano
+        map.addSource('terrain', {
+          type: 'raster-dem', encoding: 'terrarium', tileSize: 256, maxzoom: 15, tiles: [TERRAIN],
+        })
+        map.setTerrain({ source: 'terrain', exaggeration: 1.4 })
+      } catch { /* sin relieve */ }
       map.addSource('city', { type: 'geojson', data: features as unknown as GeoJSONSourceSpecification['data'] })
+      // halo luminoso (en el suelo) de las celdas nuevas
+      map.addLayer({
+        id: 'city-glow', type: 'line', source: 'city',
+        filter: ['all', ['==', ['get', 'k'], 1], ['<=', ['get', 'y'], city.base_year]] as FilterSpecification,
+        paint: { 'line-color': PROJ_NEAR, 'line-width': 5, 'line-blur': 6, 'line-opacity': 0.5 },
+      })
       map.addLayer({
         id: 'city-base', type: 'fill-extrusion', source: 'city',
         filter: ['==', ['get', 'k'], 0],
         paint: {
-          'fill-extrusion-color': BASE_COLOR,
+          'fill-extrusion-color': baseColorExpr(),
           'fill-extrusion-height': baseHeight(live.current.exag),
           'fill-extrusion-base': 0,
-          'fill-extrusion-opacity': 0.92,
+          'fill-extrusion-opacity': 0.95,
+          'fill-extrusion-vertical-gradient': true,
         },
       })
       map.addLayer({
@@ -224,23 +282,46 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
           'fill-extrusion-color': VERT_COLOR,
           'fill-extrusion-height': baseHeight(live.current.exag),
           'fill-extrusion-base': baseHeight(live.current.exag),
-          'fill-extrusion-opacity': 0.96,
+          'fill-extrusion-opacity': 0.82,
+          'fill-extrusion-vertical-gradient': true,
         },
       })
       map.addLayer({
         id: 'city-proj', type: 'fill-extrusion', source: 'city',
         filter: ['all', ['==', ['get', 'k'], 1], ['<=', ['get', 'y'], city.base_year]] as FilterSpecification,
         paint: {
-          'fill-extrusion-color': colorExpr(city, live.current.scenario) as never,
+          'fill-extrusion-color': colorExpr(live.current.scenario, city.base_year) as never,
           'fill-extrusion-height': grownHeight(1, live.current.exag),
           'fill-extrusion-base': 0,
-          'fill-extrusion-opacity': 0.88,
+          'fill-extrusion-opacity': 0.92,
+          'fill-extrusion-vertical-gradient': true,
         },
       })
       readyRef.current = true
+      progRef.current = reducedMotion() ? 1 : 0
       applyState(map)
+      // "crece desde el suelo" la primera vez que la sección entra en pantalla
+      const startRise = () => {
+        if (risenRef.current) return
+        risenRef.current = true
+        rise(0, 1300)
+      }
+      if (typeof IntersectionObserver === 'undefined') {
+        startRise()
+      } else {
+        const io = new IntersectionObserver((entries) => {
+          if (entries.some((e) => e.isIntersecting)) {
+            startRise()
+            io.disconnect()
+          }
+        }, { threshold: 0.35 })
+        io.observe(box)
+        ioRef.current = io
+      }
     })
     return () => {
+      ioRef.current?.disconnect()
+      cancelAnimationFrame(rafRef.current)
       ro.disconnect()
       readyRef.current = false
       map.remove()
@@ -428,7 +509,16 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
         <div className="city3d-legend" aria-hidden="true">
           <span><i className="sw sw-base" />{T.legendBase} {city.base_year}</span>
           <span><i className="sw sw-proj" />{T.legendHorizontal}</span>
+          <span><i className="sw sw-pulse" />{T.legendPulse}</span>
           {vert && integrated && <span><i className="sw sw-vert" />{T.legendVertical}</span>}
+        </div>
+        <div className="city3d-hbar" aria-hidden="true">
+          <span className="city3d-hbar-title">{T.legendHeight}</span>
+          <span className="city3d-hbar-row">
+            <b className="num">{HEIGHT_STOPS[0][0]} m</b>
+            <i className="bar" style={{ background: `linear-gradient(90deg, ${HEIGHT_STOPS.map(([h, c]) => `${c} ${Math.round(((h - HEIGHT_STOPS[0][0]) / (HEIGHT_STOPS[HEIGHT_STOPS.length - 1][0] - HEIGHT_STOPS[0][0])) * 100)}%`).join(', ')})` }} />
+            <b className="num">{HEIGHT_STOPS[HEIGHT_STOPS.length - 1][0]}+ m</b>
+          </span>
         </div>
       </div>
 
@@ -449,6 +539,7 @@ export function CityGrowth3D({ entry, lang }: { entry: CityIndexEntry; lang: Lan
           variant="secondary" className="city3d-play" aria-pressed={playing}
           onClick={() => {
             if (!playing && yearIdx >= years.length - 1) setYearIdx(0)
+            if (!playing) rise(0, 1200) // las alturas vuelven a crecer desde el suelo al reproducir
             setPlaying((p) => !p)
           }}
         >

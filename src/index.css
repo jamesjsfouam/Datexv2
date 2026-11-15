@@ -650,13 +650,18 @@ tr:last-child td { border-bottom: 0; }
 .scen-opt small { font-size: 0.78rem; color: var(--muted); }
 
 /* el recuadro del mapa no se sale de su tarjeta */
-.city3d-map-wrap { position: relative; height: clamp(380px, 62vh, 600px); border-radius: var(--r-l); overflow: hidden; background: #eef0ef; contain: layout paint; isolation: isolate; }
+.city3d-map-wrap { position: relative; height: clamp(380px, 62vh, 600px); border-radius: var(--r-l); overflow: hidden; background: #050a3a; contain: layout paint; isolation: isolate; }
 .city3d-map-wrap > .city3d-map { position: absolute; inset: 0; width: 100%; height: 100%; } /* gana a .maplibregl-map { position: relative } */
 .city3d-map .maplibregl-canvas { outline: 0; }
-.city3d-legend { position: absolute; left: 14px; top: 14px; z-index: 2; display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 16px; border-radius: 999px; background: rgba(255, 255, 255, 0.9); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); font-size: 0.8125rem; font-weight: 500; color: var(--ink); box-shadow: var(--shadow); }
+.city3d-legend { position: absolute; left: 14px; top: 14px; z-index: 2; display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 16px; border-radius: 22px; background: rgba(5, 10, 58, 0.72); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); font-size: 0.8125rem; font-weight: 500; color: #fff; box-shadow: 0 6px 24px rgba(0, 2, 61, 0.35); max-width: calc(100% - 70px); }
 .city3d-legend span { display: inline-flex; align-items: center; gap: 7px; }
 .city3d-legend .sw { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
-.city3d-legend .sw-base { background: #14206b; }
+.city3d-legend .sw-base { background: linear-gradient(135deg, #2a3cc4, #4f93f5 55%, #d4fbff); }
+.city3d-legend .sw-pulse { background: #f4ffff; box-shadow: 0 0 8px 1px rgba(86, 225, 232, 0.9); }
+.city3d-hbar { position: absolute; left: 14px; bottom: 14px; z-index: 2; display: grid; gap: 4px; padding: 8px 14px; border-radius: 18px; background: rgba(5, 10, 58, 0.72); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); color: #fff; font-size: 0.75rem; box-shadow: 0 6px 24px rgba(0, 2, 61, 0.35); }
+.city3d-hbar-title { font-weight: 600; }
+.city3d-hbar-row { display: flex; align-items: center; gap: 8px; }
+.city3d-hbar .bar { display: block; width: 130px; height: 8px; border-radius: 99px; }
 .city3d-legend .sw-proj { background: var(--accent); }
 
 .city3d-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px 22px; align-items: center; }
@@ -673,7 +678,7 @@ tr:last-child td { border-bottom: 0; }
 .city-open { margin-bottom: 10px; }
 .city-growth-section { margin-top: 28px; scroll-margin-top: 90px; display: flex; flex-direction: column; gap: 14px; }
 .city-growth-title { font-size: 1.5rem; font-weight: 900; letter-spacing: -0.025em; line-height: 1.15; }
-.city3d-legend .sw-vert { background: #ffffff; box-shadow: inset 0 0 0 1.5px var(--ink); }
+.city3d-legend .sw-vert { background: #e8fdff; box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.9), 0 0 8px rgba(232, 253, 255, 0.7); }
 .city3d-view { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 18px; align-items: center; }
 .city3d-exag { display: flex; flex-direction: column; gap: 4px; margin: 0; font-size: 0.875rem; font-weight: 500; color: var(--ink); }
 .city3d-exag input[type='range'] { width: 100%; accent-color: var(--ink); padding: 0; border: 0; background: none; height: 26px; }
