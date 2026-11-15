@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import {
   api,
@@ -18,6 +18,7 @@ import {
   type Variable,
 } from './api'
 import { ComparePlaces } from './ComparePlaces'
+import { useNearestCity } from './cities'
 import { DemographyView } from './DemographyView'
 import { GlobeSection, type SecondSpot, type Spot } from './GlobeSection'
 import { CONCERNS_EN, fmtNum, PLACE_TYPES_EN, tRegion, tVariable, UI, type Lang, type Phase } from './i18n'
@@ -33,10 +34,12 @@ function withTransition(update: () => void) {
   document.startViewTransition(() => flushSync(update))
 }
 
-type Tab = 'trend' | 'scan' | 'compare' | 'satellite' | 'population' | 'relate'
+type Tab = 'trend' | 'scan' | 'compare' | 'satellite' | 'population' | 'relate' | 'city3d'
 type Query = { variable: string; start: number; spot: Spot }
 
-const TAB_ORDER: Tab[] = ['trend', 'scan', 'compare', 'satellite', 'population', 'relate']
+const TAB_ORDER: Tab[] = ['trend', 'scan', 'compare', 'satellite', 'population', 'relate', 'city3d']
+
+const CityGrowth3D = lazy(() => import('./CityGrowth3D').then((m) => ({ default: m.CityGrowth3D })))
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>('briefing')
@@ -279,6 +282,10 @@ export default function App() {
     [cat],
   )
 
+  // 'Ciudad 3D' solo existe si hay un escenario precalculado a menos de 30 km del lugar del análisis
+  const cityStudio = useNearestCity(query?.spot.lat, query?.spot.lon)
+  const visibleTabs = TAB_ORDER.filter((k) => k !== 'city3d' || !!cityStudio)
+  const tabShown: Tab = tab === 'city3d' && !cityStudio ? 'trend' : tab
   const relateQuery = query
     ? {
         variable: query.variable,
@@ -370,6 +377,7 @@ export default function App() {
             years={years}
             busy={busy}
             onLaunchStudio={() => investigate({ variable, start, spot })}
+            onOpenCity={() => investigate({ variable, start, spot }, 'city3d')}
           />
         )}
 
@@ -424,11 +432,11 @@ export default function App() {
             </Card>
 
             <div className="tabs" role="tablist">
-              {TAB_ORDER.map((k) => (
+              {visibleTabs.map((k) => (
                 <button
                   key={k}
                   role="tab"
-                  aria-selected={tab === k}
+                  aria-selected={tabShown === k}
                   onClick={() => openTab(k)}
                 >
                   {t.phase3.tabs[k]}
@@ -436,7 +444,7 @@ export default function App() {
               ))}
             </div>
 
-            {busy && !['relate', 'population', 'satellite', 'compare'].includes(tab) && (
+            {busy && !['relate', 'population', 'satellite', 'compare', 'city3d'].includes(tab) && (
               <Loader label={lang === 'es' ? 'Analizando…' : 'Analyzing…'} />
             )}
 
@@ -498,6 +506,14 @@ export default function App() {
                 start={query.start}
                 lang={lang}
               />
+            )}
+
+            {tabShown === 'city3d' && cityStudio && (
+              <Suspense fallback={<Loader label={lang === 'es' ? 'Cargando la ciudad…' : 'Loading the city…'} />}>
+                <Card as="section" className="city3d-card">
+                  <CityGrowth3D entry={cityStudio} lang={lang} />
+                </Card>
+              </Suspense>
             )}
 
             {tab === 'relate' && relateQuery && (

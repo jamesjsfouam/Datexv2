@@ -3,9 +3,10 @@ import { api, type Catalog, type Place, type Variable } from './api'
 import type { CameraCmd, GlobeData } from './Globe3D'
 import { legendGradient } from './globeColors'
 import {
-  CONCERNS_EN, fmtNum, PLACE_TYPES_EN, shortVarName, tRegion, tUnit, tVariable, UI,
+  CITY, CONCERNS_EN, fmtNum, PLACE_TYPES_EN, shortVarName, tRegion, tUnit, tVariable, UI,
   type Lang,
 } from './i18n'
+import { useNearestCity } from './cities'
 import { Button, Card, Collapse, Disclosure, Switch } from './ui'
 
 const Globe3D = lazy(() => import('./Globe3D').then((m) => ({ default: m.Globe3D })))
@@ -42,6 +43,8 @@ type Props = {
   years: number[]
   busy: boolean
   onLaunchStudio: () => void
+  /** Abre la vista 'Ciudad 3D' del lugar activo (solo si hay una ciudad precalculada cerca). */
+  onOpenCity: () => void
 }
 
 export function GlobeSection(props: Props) {
@@ -51,8 +54,9 @@ export function GlobeSection(props: Props) {
     question, onQuestionChange, askInfo, onAsk,
     concern, onConcernChange, placeType, onPlaceTypeChange,
     recommended, variable, onVariableChange,
-    start, onStartChange, years, busy, onLaunchStudio,
+    start, onStartChange, years, busy, onLaunchStudio, onOpenCity,
   } = props
+  const nearCity = useNearestCity(spot.lat, spot.lon)
 
   const t = UI[lang].phase2
   const [data, setData] = useState<GlobeData | null>(null)
@@ -367,6 +371,11 @@ export function GlobeSection(props: Props) {
             </Disclosure>
           </Card>
 
+          {nearCity && (
+            <Button variant="secondary" className="big-launch city-open" onClick={onOpenCity} disabled={busy}>
+              {CITY[lang].openFromMap}
+            </Button>
+          )}
           <Button className="big-launch" onClick={onLaunchStudio} disabled={busy}>
             {busy ? t.busyBtn : t.launchBtn}
           </Button>
