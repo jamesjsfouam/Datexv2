@@ -18,6 +18,13 @@ export type CityPayload = {
   /** Escenario solo con población urbana. */
   added_base?: string
   water: string
+  /** Altura real (m, GHSL 2018) de cada celda construida en el año base; 0 = sin edificación. */
+  height?: string
+  /** Altura (m) que tendría una celda si el escenario la añade. */
+  height_new?: string
+  /** Peso de centralidad 0–100: el crecimiento vertical se concentra en el núcleo denso. */
+  core?: string
+  vertical?: CityVertical
   new_cell_density: number
   scenarios?: { default: 'integrated' | 'population_only' } & Record<string, string>
   drivers?: CityDrivers
@@ -41,6 +48,22 @@ export type CityPayload = {
   sources: string[]
   method: string
   caveats: string[]
+}
+
+export type CityVertical = {
+  theta: number
+  height_source: string
+  height_year: number
+  /** m(t) = (PIB por habitante(t) / PIB(base))^θ */
+  multiplier: Record<string, number>
+  mean_height_m: Record<string, number>
+  mean_height_existing_m: Record<string, number>
+  max_height_m: Record<string, number>
+  volume_million_m3: Record<string, number>
+  volume_from_vertical_million_m3: Record<string, number>
+  mean_height_m_population_only: Record<string, number>
+  volume_million_m3_population_only: Record<string, number>
+  sensitivity_volume_2050_million_m3: Record<string, number>
 }
 
 export type DriverRow = {
